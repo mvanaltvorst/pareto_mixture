@@ -2,6 +2,7 @@
 
 ### Installation
 ```
+git clone https://github.com/mvanaltvorst/pareto_mixture.git
 cd pareto_mixture/
 conda activate <YOUR_CONDA_ENVIRONMENT>
 conda install pip

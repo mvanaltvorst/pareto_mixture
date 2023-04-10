@@ -3,66 +3,8 @@ import numpy as np
 from collections import defaultdict
 import pandas as pd
 from numpy.linalg import inv
+from math import pow
 
-def fit_pareto_mixture_parameters(sample: Sample, k: int | None = None) -> tuple[ParetoMixtureParameters, pd.DataFrame]:
-    """
-    A function that fits alpha, beta and p on a sample with a given k.
-    If k is None, then k = len(sample)
-    """
-    if k is None:
-        k = len(sample.data)
-
-    subsample = sample.data[:k]
-    subsample = np.array(sorted(subsample))
-    
-    # Initial parameters, should converge anyways
-    current_parameters = ParetoMixtureParameters(alpha=2.0, beta=1.0, p=0.8)
-
-    subsample = Sample(subsample[:k])
-
-    MAX_ITERS_WITHOUT_PROGRESS = 8
-    MAX_ITERS = 300
-
-    last_ll = float("inf")
-    num_iters_without_progress = 0
-    STEP_SIZE = 0.9
-    history = defaultdict(dict[str, object]) # we keep track of the history of the parameters for debug purposes
-    for step in range(1, MAX_ITERS):
-        ll, grad, hess = loglikelihood(current_parameters, subsample), gradient(current_parameters, subsample), hessian(current_parameters, subsample)
-        history[step]["params"] = current_parameters
-        history[step]["ll"] = ll
-        history[step]["grad"] = grad
-        history[step]["hess"] = hess
-        if ll < last_ll + 0.00001:
-            num_iters_without_progress += 1
-            if num_iters_without_progress >= MAX_ITERS_WITHOUT_PROGRESS:
-                return current_parameters, pd.DataFrame(history).T
-        else:
-            num_iters_without_progress = 0
-        last_ll = ll
-
-        dalpha, dbeta, dp = hess_inv_gradient(hess, grad)
-        current_parameters.alpha -= dalpha * STEP_SIZE
-        current_parameters.beta -= dbeta * STEP_SIZE
-        current_parameters.p -= dp * STEP_SIZE
-        current_parameters = move_to_feas_region(current_parameters)
-    raise ValueError(f"Did not converge in {MAX_ITERS} iterations")
-
-def move_to_feas_region(pm: ParetoMixtureParameters) -> ParetoMixtureParameters:
-    # we make sure p > 0.5 w.l.g.
-    if pm.p < 0.5:
-        pm.p, pm.alpha, pm.beta = 1 - pm.p, pm.alpha + pm.beta, -pm.beta
-    if pm.p > 2.0:
-        pm.p = 2.0
-
-    # Lower bounds on alpha and alpha+beta
-    if pm.alpha < 0.0001:
-        pm.alpha = 0.0001
-    if pm.alpha + pm.beta < 0.0001:
-        pm.beta = 0.0001 - pm.alpha
-    if np.abs(pm.beta) < 0.001:
-        pm.beta = pm.beta * 0.3 / np.abs(pm.beta)
-    return pm
 
 def hess_inv_gradient(hess: Hessian, grad: Gradient):
     """
@@ -89,7 +31,7 @@ def loglikelihood(pm: ParetoMixtureParameters, sample: Sample) -> float:
     p = pm.p
     x = sample.data
     return np.sum(
-        np.log(p * x ** (-alpha - 1.) + (1 - p) * x ** (-alpha - beta - 1.))
+        np.log(p * x ** (-alpha) + (1 - p) * x ** (-beta))
     )
 
 def gradient(pm: ParetoMixtureParameters, sample: Sample) -> Gradient:
@@ -101,13 +43,13 @@ def gradient(pm: ParetoMixtureParameters, sample: Sample) -> Gradient:
     p = pm.p
     x = sample.data
     dll_dalpha = np.sum(
-        (-alpha*p*x**(-alpha - 1)*np.log(x) + p*x**(-alpha - 1) + x**(-alpha - beta - 1)*(1 - p)*(-alpha - beta)*np.log(x) + x**(-alpha - beta - 1)*(1 - p))/(alpha*p*x**(-alpha - 1) - x**(-alpha - beta - 1)*(1 - p)*(-alpha - beta))
+        -p*(x**(-alpha))*np.log(x)/(p*(x**(-alpha)) + (x**(-beta))*(1 - p))
     )
     dll_dbeta = np.sum(
-        (x**(-alpha - beta - 1)*(1 - p)*(-alpha - beta)*np.log(x) + x**(-alpha - beta - 1)*(1 - p))/(alpha*p*x**(-alpha - 1) - x**(-alpha - beta - 1)*(1 - p)*(-alpha - beta))
+        -(x**(-beta))*(1 - p)*np.log(x)/(p*(x**(-alpha)) + (x**(-beta))*(1 - p))
     )
     dll_dp = np.sum(
-        (alpha*x**(-alpha - 1) + x**(-alpha - beta - 1)*(-alpha - beta))/(alpha*p*x**(-alpha - 1) - x**(-alpha - beta - 1)*(1 - p)*(-alpha - beta))
+        (-(x**(-beta)) + (x**(-alpha)))/(p*(x**(-alpha)) + (x**(-beta))*(1 - p))
     )
     return Gradient(dll_dalpha, dll_dbeta, dll_dp)
 

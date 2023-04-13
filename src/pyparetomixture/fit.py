@@ -31,7 +31,7 @@ def loglikelihood(pm: ParetoMixtureParameters, sample: Sample) -> float:
     p = pm.p
     x = sample.data
     return np.sum(
-        np.log(p * x ** (-alpha) + (1 - p) * x ** (-beta))
+        np.log(p * alpha * x ** (-alpha-1) + (1 - p) * beta * x ** (-beta - 1))
     )
 
 def gradient(pm: ParetoMixtureParameters, sample: Sample) -> Gradient:

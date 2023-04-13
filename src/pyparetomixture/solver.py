@@ -5,6 +5,7 @@ import numpy as np
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import seaborn as sns
+from joblib import Parallel, delayed
 
 
 class Solver:
@@ -70,7 +71,7 @@ class Solver:
         multiplier = self.initial_step_size
         new_ll = None
         for step in range(1, self.max_step_iterations + 1):
-        # for step in range(1, 10):
+            # for step in range(1, 10):
             new_pmp = pmp + direction * multiplier
 
             logger.debug(f"New pmp in backtracking line search: {new_pmp}")
@@ -167,9 +168,20 @@ class Solver:
         else:
             raise NotImplementedError("p > 1 not implemented yet")
 
-    def visualize_path_history(self, sample, true_alpha: float, true_beta: float, true_p: float, figsize = (16/1.4, 9 / 1.4)):
-        min_alpha, max_alpha = 0, -np.inf
-        min_beta, max_beta = 0, -np.inf
+    def visualize_path_history(
+        self,
+        sample,
+        true_alpha: float,
+        true_beta: float,
+        true_p: float,
+        go_outside_p_bounds=True,
+        parallel=True,
+        resolution: int = 50,
+        surface_count: int = 19,
+        lower_quantile: float = 0.9
+    ):
+        min_alpha, max_alpha = 0.2, -np.inf
+        min_beta, max_beta = 0.2, -np.inf
         min_p, max_p = 0, 1
         for step, values in self.path_history.items():
             min_alpha = min(min_alpha, values["pmp"].alpha)  # type: ignore
@@ -178,7 +190,7 @@ class Solver:
             max_beta = max(max_beta, values["pmp"].beta)  # type: ignore
             min_p = min(min_p, values["pmp"].p)  # type: ignore
             max_p = max(max_p, values["pmp"].p)  # type: ignore
-        
+
         min_alpha = min(min_alpha, true_alpha)
         max_alpha = max(max_alpha, true_alpha)
         min_beta = min(min_beta, true_beta)
@@ -186,54 +198,105 @@ class Solver:
         min_p = min(min_p, true_p)
         max_p = max(max_p, true_p)
 
-
-        logger.debug(f"min_alpha={min_alpha},\tmax_alpha={max_alpha}\nmin_beta={min_beta},\tmax_beta={max_beta}\nmin_p={min_p},\tmax_p={max_p}")
+        logger.debug(
+            f"min_alpha={min_alpha},\tmax_alpha={max_alpha}\nmin_beta={min_beta},\tmax_beta={max_beta}\nmin_p={min_p},\tmax_p={max_p}"
+        )
 
         # we broaden our alphas and betas such that there's a 10% margin on either side
-        margin_size = 0.1 # 10%
-        margin_alpha = (max_alpha - min_alpha) * margin_size + 0.1
-        margin_beta = (max_beta - min_beta) * margin_size + 0.1
-        margin_p = (max_p - min_p) * margin_size + 0.1
-        alpha_range = np.linspace(
-            min_alpha - margin_alpha, max_alpha + margin_alpha, 50
+        margin_size = 0.1  # 10%
+        margin_alpha = (max_alpha - min_alpha) * margin_size + 1.5
+        margin_beta = (max_beta - min_beta) * margin_size + 1.5
+        margin_p = (max_p - min_p) * margin_size + 0.2
+        alpha_range = np.linspace(min_alpha, max_alpha + margin_alpha, resolution)
+        beta_range = np.linspace(min_beta, max_beta + margin_beta, resolution)
+        p_range = np.linspace(min_p - margin_p, max_p + margin_p, resolution)
+        if not go_outside_p_bounds:
+            p_range = np.linspace(0, 1, 75)
+        alpha_grid, beta_grid, p_grid = np.meshgrid(
+            alpha_range, beta_range, p_range, indexing="ij"
         )
-        beta_range = np.linspace(min_beta - margin_beta, max_beta + margin_beta, 50)
-        p_range = np.linspace(min_p - margin_p, max_p + margin_p, 50)
-        alpha_grid, beta_grid, p_grid = np.meshgrid(alpha_range, beta_range, p_range, indexing = "ij")
         ll_grid = np.zeros_like(alpha_grid)
-        for i, alpha in enumerate(alpha_range):
-            for j, beta in enumerate(beta_range):
-                for k, p in enumerate(p_range):
-                    ll_grid[i, j, k] = loglikelihood(ParetoMixtureParameters(alpha, beta, p), sample)
-                    try:
-                        assert alpha_grid[i, j, k] - alpha < 0.001
-                        assert beta_grid[i, j, k] - beta < 0.001
-                        assert p_grid[i, j, k] - p < 0.001
-                    except AssertionError:
-                        print(f"alpha_grid[{i}, {j}, {k}]={alpha_grid[i, j, k]}, alpha={alpha}")
-                        print(f"beta_grid[{i}, {j}, {k}]={beta_grid[i, j, k]}, beta={beta}")
-                        print(f"p_grid[{i}, {j}, {k}]={p_grid[i, j, k]}, p={p}")
-                        raise
+        best_pt = [None, None, None]
+        best_ll = -np.inf
+
+        if not parallel:
+            for i, alpha in enumerate(alpha_range):
+                for j, beta in enumerate(beta_range):
+                    for k, p in enumerate(p_range):
+                        ll_grid[i, j, k] = loglikelihood(
+                            ParetoMixtureParameters(alpha, beta, p), sample
+                        )
+                        if 0 < p and p < 1 and ll_grid[i, j, k] > best_ll:
+                            best_ll = ll_grid[i, j, k]
+                            best_pt = [alpha, beta, p]
+                        try:
+                            assert alpha_grid[i, j, k] - alpha < 0.001
+                            assert beta_grid[i, j, k] - beta < 0.001
+                            assert p_grid[i, j, k] - p < 0.001
+                        except AssertionError:
+                            print(
+                                f"alpha_grid[{i}, {j}, {k}]={alpha_grid[i, j, k]}, alpha={alpha}"
+                            )
+                            print(
+                                f"beta_grid[{i}, {j}, {k}]={beta_grid[i, j, k]}, beta={beta}"
+                            )
+                            print(f"p_grid[{i}, {j}, {k}]={p_grid[i, j, k]}, p={p}")
+                            raise
+        else:
+            ll_grid_values = Parallel(n_jobs=-1, verbose=1)(
+                delayed(loglikelihood)(ParetoMixtureParameters(alpha, beta, p), sample)
+                for alpha in alpha_range
+                for beta in beta_range
+                for p in p_range
+            )
+            ll_grid_values = np.array(ll_grid_values)
+            ll_grid_values = ll_grid_values.reshape(
+                (len(alpha_range), len(beta_range), len(p_range))
+            )
+            ll_grid = ll_grid_values
+            for i, alpha in enumerate(alpha_range):
+                for j, beta in enumerate(beta_range):
+                    for k, p in enumerate(p_range):
+                        if 0 < p and p < 1 and ll_grid[i, j, k] > best_ll:
+                            best_ll = ll_grid[i, j, k]
+                            best_pt = [alpha, beta, p]
+                        try:
+                            assert alpha_grid[i, j, k] - alpha < 0.001
+                            assert beta_grid[i, j, k] - beta < 0.001
+                            assert p_grid[i, j, k] - p < 0.001
+                        except AssertionError:
+                            print(
+                                f"alpha_grid[{i}, {j}, {k}]={alpha_grid[i, j, k]}, alpha={alpha}"
+                            )
+                            print(
+                                f"beta_grid[{i}, {j}, {k}]={beta_grid[i, j, k]}, beta={beta}"
+                            )
+                            print(f"p_grid[{i, j}, {k}]={p_grid[i, j, k]}, p={p}")
+                            raise
 
         import plotly.graph_objects as go
 
-        fig = go.Figure(data=go.Volume(
-            x=alpha_grid.flatten(),
-            y=beta_grid.flatten(),
-            z=p_grid.flatten(),
-            value=ll_grid.flatten(),
-            # isomin=-0.1,
-            # isomax=0.8,
-            opacity=0.2, # needs to be small to see through all surfaces
-            surface_count=21, # needs to be a large number for good volume rendering
-        ))
+        fig = go.Figure(
+            data=go.Volume(
+                x=alpha_grid.flatten(),
+                y=beta_grid.flatten(),
+                z=p_grid.flatten(),
+                value=ll_grid.flatten(),
+                # isomin=ll_grid, # isomin is llgrid median
+                isomin = np.quantile(ll_grid, lower_quantile),
+                # isomax=0.8,
+                opacity=0.2,  # needs to be small to see through all surfaces
+                surface_count=surface_count,  # needs to be a large number for good volume rendering
+            )
+        )
         # we set axis labels
-        fig.update_layout(scene = dict(
-            xaxis_title='alpha',
-            yaxis_title='beta',
-            zaxis_title='p',
+        fig.update_layout(
+            scene=dict(
+                xaxis_title="alpha",
+                yaxis_title="beta",
+                zaxis_title="p",
             ),
-            margin=dict(r=20, l=10, b=10, t=10)
+            margin=dict(r=20, l=10, b=10, t=10),
         )
 
         # we draw a yellow plane through the 3d plot at p = 1
@@ -246,15 +309,14 @@ class Solver:
             y=beta_plane,
             z=p_plane,
             surfacecolor=np.ones_like(alpha_plane) * 1,  # Color based on p value
-            colorscale=[[0, 'yellow'], [1, 'yellow']],  # Set the color for the plane
+            colorscale=[[0, "yellow"], [1, "yellow"]],  # Set the color for the plane
             showscale=False,  # Disable the color scale
-            opacity=0.3  # Set the opacity for the plane
+            opacity=0.3,  # Set the opacity for the plane
         )
 
         fig.add_trace(plane)
 
-
-         # and through p = 0
+        # and through p = 0
         alpha_plane, beta_plane = np.meshgrid(alpha_range, beta_range)
         p_plane = np.zeros_like(alpha_plane)
 
@@ -264,25 +326,41 @@ class Solver:
             y=beta_plane,
             z=p_plane,
             surfacecolor=np.ones_like(alpha_plane) * 1,  # Color based on p value
-            colorscale=[[0, 'yellow'], [1, 'yellow']],  # Set the color for the plane
+            colorscale=[[0, "yellow"], [1, "yellow"]],  # Set the color for the plane
             showscale=False,  # Disable the color scale
-            opacity=0.3  # Set the opacity for the plane
+            opacity=0.3,  # Set the opacity for the plane
         )
 
         # Finally, add the plane to the figure
         fig.add_trace(plane)
-        
+
         point = go.Scatter3d(
-            x=[2],  # X-coordinate (alpha)
-            y=[3],  # Y-coordinate (beta)
-            z=[0.95],  # Z-coordinate (p)
-            mode='markers',
+            x=[true_alpha],  # X-coordinate (alpha)
+            y=[true_beta],  # Y-coordinate (beta)
+            z=[true_p],  # Z-coordinate (p)
+            mode="markers",
             marker=dict(
                 size=6,  # Set the size of the marker
-                color='red',  # Set the color of the marker
-                symbol='circle',  # Set the marker symbol
+                color="red",  # Set the color of the marker
+                symbol="circle",  # Set the marker symbol
             ),
-            name=f'Point ({true_alpha}, {true_beta}, {true_p})',  # Set the trace name (optional)
+            name=f"Point ({true_alpha}, {true_beta}, {true_p})",  # Set the trace name (optional)
+        )
+
+        # Add the point to the figure
+        fig.add_trace(point)
+
+        point = go.Scatter3d(
+            x=[best_pt[0]],  # X-coordinate (alpha)
+            y=[best_pt[1]],  # Y-coordinate (beta)
+            z=[best_pt[2]],  # Z-coordinate (p)
+            mode="markers",
+            marker=dict(
+                size=6,  # Set the size of the marker
+                color="green",  # Set the color of the marker
+                symbol="circle",  # Set the marker symbol
+            ),
+            name=f"Max LL Point ({best_pt[0]}, {best_pt[1]}, {best_pt[2]})",  # Set the trace name (optional)
         )
 
         # Add the point to the figure
@@ -301,14 +379,13 @@ class Solver:
             x=alpha_steps,
             y=beta_steps,
             z=p_steps,
-            mode='lines+markers',
-            line=dict(color='blue', width=3),
-            marker=dict(size=6, color='blue', symbol='circle'),
-            name='Line Search Steps',
+            mode="lines+markers",
+            line=dict(color="blue", width=3),
+            marker=dict(size=6, color="blue", symbol="circle"),
+            name="Line Search Steps",
         )
 
         # Add the steps trace to the figure
-        fig.add_trace(steps_trace)
+        # fig.add_trace(steps_trace)
 
         return fig
-    
